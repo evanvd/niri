@@ -1823,6 +1823,7 @@ mod tests {
                     open_floating: Some(
                         false,
                     ),
+                    open_sticky: None,
                     open_focused: Some(
                         true,
                     ),

@@ -77,6 +77,14 @@ niri_render_elements! {
     }
 }
 
+/// Filter for rendering floating windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingFilter {
+    All,
+    StickyOnly,
+    NonStickyOnly,
+}
+
 /// Extra per-tile data.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Data {
@@ -416,6 +424,80 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
+    }
+
+    pub fn is_tile_sticky(&self, id: &W::Id) -> bool {
+        self.tiles
+            .iter()
+            .find(|tile| tile.window().id() == id)
+            .is_some_and(|tile| tile.is_sticky())
+    }
+
+    pub fn set_tile_sticky(&mut self, id: &W::Id, sticky: bool) {
+        if let Some(tile) = self.tiles.iter_mut().find(|tile| tile.window().id() == id) {
+            tile.set_sticky(sticky);
+        }
+    }
+
+    pub fn toggle_tile_sticky(&mut self, id: &W::Id) -> bool {
+        if let Some(tile) = self.tiles.iter_mut().find(|tile| tile.window().id() == id) {
+            let new_val = !tile.is_sticky();
+            tile.set_sticky(new_val);
+            new_val
+        } else {
+            false
+        }
+    }
+
+    pub fn has_sticky_tiles(&self) -> bool {
+        self.tiles.iter().any(|tile| tile.is_sticky())
+    }
+
+    pub fn extract_sticky_tiles(&mut self) -> Vec<(Tile<W>, bool)> {
+        let mut extracted = Vec::new();
+        let mut i = 0;
+        while i < self.tiles.len() {
+            if self.tiles[i].is_sticky() {
+                let is_active =
+                    Some(self.tiles[i].window().id()) == self.active_window_id.as_ref();
+                let mut tile = self.tiles.remove(i);
+                let data = self.data.remove(i);
+                if let Some(size) = tile.window().expected_size() {
+                    tile.floating_window_size = Some(size);
+                }
+                tile.floating_pos = Some(data.pos);
+                extracted.push((tile, is_active));
+            } else {
+                i += 1;
+            }
+        }
+
+        if self.tiles.is_empty() {
+            self.active_window_id = None;
+        } else if self
+            .active_window_id
+            .as_ref()
+            .is_some_and(|id| !self.tiles.iter().any(|t| t.window().id() == id))
+        {
+            self.active_window_id = Some(self.tiles[0].window().id().clone());
+        }
+
+        extracted
+    }
+
+    pub fn insert_sticky_tiles(&mut self, tiles: Vec<(Tile<W>, bool)>) {
+        for (mut tile, was_active) in tiles.into_iter().rev() {
+            tile.update_config(self.view_size, self.scale, self.options.clone());
+            let pos = self.stored_or_default_tile_pos(&tile).unwrap_or_else(|| {
+                center_preferring_top_left_in_area(self.working_area, tile.tile_size())
+            });
+            let new_data = Data::new(self.working_area, &tile, pos);
+            if was_active || self.tiles.is_empty() {
+                self.active_window_id = Some(tile.window().id().clone());
+            }
+            self.data.insert(0, new_data);
+            self.tiles.insert(0, tile);
+        }
     }
 
     pub fn add_tile(&mut self, tile: Tile<W>, activate: bool) {
@@ -1067,19 +1149,39 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     pub fn render<R: NiriRenderer>(
         &self,
-        mut ctx: RenderCtx<R>,
+        ctx: RenderCtx<R>,
         xray_pos: XrayPos,
         view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
+        self.render_filtered(
+            ctx,
+            xray_pos,
+            view_rect,
+            focus_ring,
+            layer,
+            FloatingFilter::All,
+            push,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_filtered<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        view_rect: Rectangle<f64, Logical>,
+        focus_ring: bool,
+        layer: RenderLayer,
+        filter: FloatingFilter,
+        push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
+    ) {
         let scale = Scale::from(self.scale);
 
-        // Draw the closing windows on top of the other windows.
-        //
-        // FIXME: I guess this should rather preserve the stacking order when the window is closed.
-        if layer.is_normal() {
+        // Draw the closing windows on top of the other windows (only when rendering non-sticky or all).
+        if layer.is_normal() && filter != FloatingFilter::StickyOnly {
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
                 push(elem.into());
@@ -1091,6 +1193,20 @@ impl<W: LayoutElement> FloatingSpace<W> {
             // Skip tiles belonging to a different render layer.
             if layer.is_normal() == tile.is_moving_between_workspaces() {
                 continue;
+            }
+
+            match filter {
+                FloatingFilter::All => (),
+                FloatingFilter::StickyOnly => {
+                    if !tile.is_sticky() {
+                        continue;
+                    }
+                }
+                FloatingFilter::NonStickyOnly => {
+                    if tile.is_sticky() {
+                        continue;
+                    }
+                }
             }
 
             // For the active tile, draw the focus ring.

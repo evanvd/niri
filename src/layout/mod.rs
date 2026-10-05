@@ -241,6 +241,7 @@ pub trait LayoutElement {
     fn set_activated(&mut self, active: bool);
     fn set_active_in_column(&mut self, active: bool);
     fn set_floating(&mut self, floating: bool);
+    fn set_sticky(&mut self, _sticky: bool) {}
     fn set_bounds(&self, bounds: Size<i32, Logical>);
     fn is_ignoring_opacity_window_rule(&self) -> bool;
 
@@ -3247,6 +3248,73 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.set_window_floating(window, floating);
+    }
+
+    pub fn toggle_window_sticky(&mut self, window: Option<&W::Id>) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+            if window.is_none() || window == Some(move_.tile.window().id()) {
+                let new_sticky = !move_.tile.is_sticky();
+                move_.tile.set_sticky(new_sticky);
+                return;
+            }
+        }
+
+        let workspace = if let Some(window) = window {
+            Some(
+                self.workspaces_mut()
+                    .find(|ws| ws.has_window(window))
+                    .unwrap(),
+            )
+        } else {
+            self.active_workspace_mut()
+        };
+
+        let Some(workspace) = workspace else {
+            return;
+        };
+        workspace.toggle_window_sticky(window);
+    }
+
+    pub fn set_window_sticky(&mut self, window: Option<&W::Id>, sticky: bool) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+            if window.is_none() || window == Some(move_.tile.window().id()) {
+                move_.tile.set_sticky(sticky);
+                return;
+            }
+        }
+
+        let workspace = if let Some(window) = window {
+            Some(
+                self.workspaces_mut()
+                    .find(|ws| ws.has_window(window))
+                    .unwrap(),
+            )
+        } else {
+            self.active_workspace_mut()
+        };
+
+        let Some(workspace) = workspace else {
+            return;
+        };
+        workspace.set_window_sticky(window, sticky);
+    }
+
+    pub fn is_floating(&self, id: &W::Id) -> bool {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == id {
+                return move_.is_floating;
+            }
+        }
+        self.workspaces().any(|(_, _, ws)| ws.is_floating(id))
+    }
+
+    pub fn is_sticky(&self, id: &W::Id) -> bool {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == id {
+                return move_.tile.is_sticky();
+            }
+        }
+        self.workspaces().any(|(_, _, ws)| ws.is_sticky(id))
     }
 
     pub fn focus_floating(&mut self) {
