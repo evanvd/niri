@@ -62,6 +62,9 @@ pub struct Tile<W: LayoutElement> {
     /// Whether the tile should float upon unfullscreening.
     pub(super) restore_to_floating: bool,
 
+    /// Whether this tile is sticky across workspaces on its monitor.
+    pub(super) is_sticky: bool,
+
     /// The size that the window should assume when going floating.
     ///
     /// This is generally the last size the window had when it was floating. It can be unknown if
@@ -190,9 +193,10 @@ impl<W: LayoutElement> Tile<W> {
         let border_config = options.layout.border.merged_with(&rules.border);
         let focus_ring_config = options.layout.focus_ring.merged_with(&rules.focus_ring);
         let shadow_config = options.layout.shadow.merged_with(&rules.shadow);
+        let is_sticky = rules.compute_open_sticky();
         let sizing_mode = window.sizing_mode();
 
-        Self {
+        let mut tile = Self {
             window,
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),
@@ -200,6 +204,7 @@ impl<W: LayoutElement> Tile<W> {
             sizing_mode,
             fullscreen_backdrop: SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.]),
             restore_to_floating: false,
+            is_sticky,
             floating_window_size: None,
             floating_pos: None,
             floating_preset_width_idx: None,
@@ -216,7 +221,9 @@ impl<W: LayoutElement> Tile<W> {
             scale,
             clock,
             options,
-        }
+        };
+        tile.window.set_sticky(is_sticky);
+        tile
     }
 
     pub fn update_config(
@@ -712,6 +719,15 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn sizing_mode(&self) -> SizingMode {
         self.sizing_mode
+    }
+
+    pub fn is_sticky(&self) -> bool {
+        self.is_sticky
+    }
+
+    pub fn set_sticky(&mut self, sticky: bool) {
+        self.is_sticky = sticky;
+        self.window.set_sticky(sticky);
     }
 
     fn fullscreen_progress(&self) -> f64 {

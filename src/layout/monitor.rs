@@ -439,6 +439,70 @@ impl<W: LayoutElement> Monitor<W> {
         self.add_workspace_at(self.workspaces.len());
     }
 
+    pub fn transfer_sticky_windows(&mut self, from_idx: usize, to_idx: usize) {
+        if from_idx == to_idx || from_idx >= self.workspaces.len() || to_idx >= self.workspaces.len() {
+            return;
+        }
+
+        let from_id = self.workspaces[from_idx].id();
+        let to_id = self.workspaces[to_idx].id();
+
+        let sticky_win_ids: Vec<W::Id> = self.workspaces[from_idx]
+            .tiles()
+            .filter(|t| t.is_sticky())
+            .map(|t| t.window().id().clone())
+            .collect();
+
+        if sticky_win_ids.is_empty() {
+            return;
+        }
+
+        let config = self.options.animations.workspace_switch.0;
+
+        for win_id in sticky_win_ids {
+            let was_active = self.workspaces[from_idx].active_window().map(|w| w.id()) == Some(&win_id);
+            let old_render_pos = self.workspaces[from_idx]
+                .tiles_with_render_positions()
+                .find_map(|(tile, offset, _)| (tile.window().id() == &win_id).then_some(offset));
+
+            let transaction = Transaction::new();
+            let removed = self.workspaces[from_idx].remove_tile(&win_id, transaction);
+
+            self.add_tile(
+                removed.tile,
+                MonitorAddWindowTarget::Workspace {
+                    id: to_id,
+                    column_idx: None,
+                },
+                if was_active {
+                    ActivateWindow::Yes
+                } else {
+                    ActivateWindow::No
+                },
+                false,
+                removed.width,
+                removed.is_full_width,
+                removed.is_floating,
+                Some(config),
+            );
+
+            if let (Some(mut old_render_pos), Some(source_workspace_idx)) =
+                (old_render_pos, self.idx_of_ws(from_id))
+            {
+                old_render_pos.y += self.workspace_size_with_gap(1.).h
+                    * (source_workspace_idx as f64 - to_idx as f64);
+
+                if let Some((tile, new_render_pos)) = self.workspaces[to_idx]
+                    .tiles_with_render_positions_mut(false)
+                    .find(|(tile, _)| tile.window().id() == &win_id)
+                {
+                    tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+                    tile.set_anim_y_between_workspaces();
+                }
+            }
+        }
+    }
+
     pub fn activate_workspace(&mut self, idx: usize) {
         self.activate_workspace_with_anim_config(idx, None);
     }
@@ -457,6 +521,10 @@ impl<W: LayoutElement> Monitor<W> {
 
         let prev_active_idx = self.active_workspace_idx;
         self.active_workspace_idx = idx;
+
+        if prev_active_idx != idx {
+            self.transfer_sticky_windows(prev_active_idx, idx);
+        }
 
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
@@ -856,7 +924,8 @@ impl<W: LayoutElement> Monitor<W> {
             .unwrap();
 
         let transaction = Transaction::new();
-        let removed = workspace.remove_tile(&window, transaction);
+        let mut removed = workspace.remove_tile(&window, transaction);
+        removed.tile.set_sticky(false);
 
         // If the view is following the tile, match the animation.
         let config = if activate {
@@ -2048,37 +2117,42 @@ impl<W: LayoutElement> Monitor<W> {
             self.workspace_size_with_gap(1.).h
         };
 
-        let Some(WorkspaceSwitch::Gesture(gesture)) = &mut self.workspace_switch else {
-            return false;
+        let (velocity, new_idx, current_idx) = {
+            let Some(WorkspaceSwitch::Gesture(gesture)) = &mut self.workspace_switch else {
+                return false;
+            };
+
+            // Take into account any idle time between the last event and now.
+            let now = self.clock.now_unadjusted();
+            gesture.tracker.push(0., now);
+
+            let mut rubber_band = WORKSPACE_GESTURE_RUBBER_BAND;
+            rubber_band.limit /= zoom;
+
+            let mut velocity = gesture.tracker.velocity() / total_height;
+            let current_pos = gesture.tracker.pos() / total_height;
+            let pos = gesture.tracker.projected_end_pos() / total_height;
+
+            let (min, max) = gesture.min_max(self.workspaces.len());
+            let new_idx = gesture.start_idx + pos;
+
+            let new_idx = new_idx.clamp(min, max);
+            let new_idx = new_idx.round() as usize;
+
+            velocity *= rubber_band.clamp_derivative(min, max, gesture.start_idx + current_pos);
+            (velocity, new_idx, gesture.current_idx)
         };
 
-        // Take into account any idle time between the last event and now.
-        let now = self.clock.now_unadjusted();
-        gesture.tracker.push(0., now);
-
-        let mut rubber_band = WORKSPACE_GESTURE_RUBBER_BAND;
-        rubber_band.limit /= zoom;
-
-        let mut velocity = gesture.tracker.velocity() / total_height;
-        let current_pos = gesture.tracker.pos() / total_height;
-        let pos = gesture.tracker.projected_end_pos() / total_height;
-
-        let (min, max) = gesture.min_max(self.workspaces.len());
-        let new_idx = gesture.start_idx + pos;
-
-        let new_idx = new_idx.clamp(min, max);
-        let new_idx = new_idx.round() as usize;
-
-        velocity *= rubber_band.clamp_derivative(min, max, gesture.start_idx + current_pos);
-
-        if self.active_workspace_idx != new_idx {
-            self.previous_workspace_id = Some(self.workspaces[self.active_workspace_idx].id());
+        let prev_active_idx = self.active_workspace_idx;
+        if prev_active_idx != new_idx {
+            self.previous_workspace_id = Some(self.workspaces[prev_active_idx].id());
+            self.transfer_sticky_windows(prev_active_idx, new_idx);
         }
 
         self.active_workspace_idx = new_idx;
         self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
             self.clock.clone(),
-            gesture.current_idx,
+            current_idx,
             new_idx as f64,
             velocity,
             self.options.animations.workspace_switch.0,

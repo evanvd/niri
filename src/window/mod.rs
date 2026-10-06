@@ -70,6 +70,9 @@ pub struct ResolvedWindowRules {
     /// Whether the window should open floating.
     pub open_floating: Option<bool>,
 
+    /// Whether the window should open sticky.
+    pub open_sticky: Option<bool>,
+
     /// Whether the window should open focused.
     pub open_focused: Option<bool>,
 
@@ -259,6 +262,10 @@ impl ResolvedWindowRules {
                     resolved.open_floating = Some(x);
                 }
 
+                if let Some(x) = rule.open_sticky {
+                    resolved.open_sticky = Some(x);
+                }
+
                 if let Some(x) = rule.open_focused {
                     resolved.open_focused = Some(x);
                 }
@@ -379,6 +386,10 @@ impl ResolvedWindowRules {
             return res;
         }
 
+        if self.open_sticky == Some(true) {
+            return true;
+        }
+
         // Windows with a parent (usually dialogs) open as floating by default.
         if toplevel.parent().is_some() {
             return true;
@@ -393,6 +404,10 @@ impl ResolvedWindowRules {
 
         // We open fixed-height windows as floating.
         min_size.h > 0 && min_size.h == max_size.h
+    }
+
+    pub fn compute_open_sticky(&self) -> bool {
+        self.open_sticky.unwrap_or(false)
     }
 }
 

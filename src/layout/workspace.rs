@@ -17,7 +17,7 @@ use smithay::utils::{Logical, Point, Rectangle, Serial, Size, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
-use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::floating::{FloatingFilter, FloatingSpace, FloatingSpaceRenderElement};
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
@@ -470,6 +470,14 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn is_floating(&self, id: &W::Id) -> bool {
         self.floating.has_window(id)
+    }
+
+    pub fn is_sticky(&self, id: &W::Id) -> bool {
+        self.floating.is_tile_sticky(id)
+    }
+
+    pub fn has_sticky_floating_windows(&self) -> bool {
+        self.floating.has_sticky_tiles()
     }
 
     pub fn current_output(&self) -> Option<&Output> {
@@ -1289,8 +1297,18 @@ impl<W: LayoutElement> Workspace<W> {
         let mut restore_to_floating = false;
         if self.floating.has_window(window) {
             if is_fullscreen {
+                let was_sticky = self.floating.is_tile_sticky(window);
                 restore_to_floating = true;
                 self.toggle_window_floating(Some(window));
+                if was_sticky {
+                    if let Some(tile) = self
+                        .scrolling
+                        .tiles_mut()
+                        .find(|tile| tile.window().id() == window)
+                    {
+                        tile.set_sticky(true);
+                    }
+                }
             } else {
                 // Floating windows are never fullscreen, so this is an unfullscreen request for an
                 // already unfullscreen window.
@@ -1428,7 +1446,8 @@ impl<W: LayoutElement> Workspace<W> {
             .unwrap();
 
         if self.floating.has_window(&id) {
-            let removed = self.floating.remove_tile(&id);
+            let mut removed = self.floating.remove_tile(&id);
+            removed.tile.set_sticky(false);
             // FIXME: compute closest pos?
             self.scrolling.add_tile(
                 None,
@@ -1484,6 +1503,62 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.toggle_window_floating(id);
+    }
+
+    pub fn toggle_window_sticky(&mut self, id: Option<&W::Id>) {
+        let active_id = self.active_window().map(|win| win.id().clone());
+        let Some(id) = id.cloned().or(active_id) else {
+            return;
+        };
+
+        if !self.floating.has_window(&id) {
+            // Auto-float on pin.
+            self.toggle_window_floating(Some(&id));
+            self.floating.set_tile_sticky(&id, true);
+        } else {
+            self.floating.toggle_tile_sticky(&id);
+        }
+    }
+
+    pub fn set_window_sticky(&mut self, id: Option<&W::Id>, sticky: bool) {
+        let active_id = self.active_window().map(|win| win.id().clone());
+        let Some(id) = id.cloned().or(active_id) else {
+            return;
+        };
+
+        if !self.floating.has_window(&id) {
+            if sticky {
+                // Auto-float on pin.
+                self.toggle_window_floating(Some(&id));
+                self.floating.set_tile_sticky(&id, true);
+            }
+        } else {
+            self.floating.set_tile_sticky(&id, sticky);
+        }
+    }
+
+    pub fn extract_sticky_floating_tiles(&mut self) -> (Vec<(Tile<W>, bool)>, bool) {
+        let was_sticky_active = self.floating_is_active()
+            && self
+                .floating
+                .active_window()
+                .is_some_and(|w| self.floating.is_tile_sticky(w.id()));
+        let tiles = self.floating.extract_sticky_tiles();
+        (tiles, was_sticky_active)
+    }
+
+    pub fn insert_sticky_floating_tiles(
+        &mut self,
+        tiles: Vec<(Tile<W>, bool)>,
+        make_active: bool,
+    ) {
+        if tiles.is_empty() {
+            return;
+        }
+        self.floating.insert_sticky_tiles(tiles);
+        if make_active {
+            self.floating_is_active = FloatingActive::Yes;
+        }
     }
 
     pub fn focus_floating(&mut self) {
@@ -1678,18 +1753,31 @@ impl<W: LayoutElement> Workspace<W> {
         layer: RenderLayer,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
+        self.render_floating_filtered(ctx, xray_pos, focus_ring, layer, FloatingFilter::All, push);
+    }
+
+    pub fn render_floating_filtered<R: NiriRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        layer: RenderLayer,
+        filter: FloatingFilter,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
         if !self.is_floating_visible() && layer.is_normal() {
             return;
         }
 
         let view_rect = Rectangle::from_size(self.view_size);
         let floating_focus_ring = focus_ring && self.floating_is_active();
-        self.floating.render(
+        self.floating.render_filtered(
             ctx,
             xray_pos,
             view_rect,
             floating_focus_ring,
             layer,
+            filter,
             &mut |elem| push(elem.into()),
         );
     }
@@ -1787,6 +1875,47 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
         self.scrolling.start_open_animation(id) || self.floating.start_open_animation(id)
+    }
+
+    pub fn sticky_window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
+        if self.is_floating_visible() {
+            self.floating
+                .tiles_with_render_positions()
+                .filter(|(tile, _)| tile.is_sticky())
+                .find_map(|(tile, tile_pos)| HitType::hit_tile(tile, tile_pos, pos))
+        } else {
+            None
+        }
+    }
+
+    pub fn sticky_resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<ResizeEdge> {
+        if !self.is_floating_visible() {
+            return None;
+        }
+
+        self.floating
+            .tiles_with_render_positions()
+            .filter(|(tile, _)| tile.is_sticky())
+            .find_map(|(tile, tile_pos)| {
+                let pos_within_tile = pos - tile_pos;
+                if tile.hit(pos_within_tile).is_some() {
+                    let size = tile.tile_size().to_f64();
+                    let mut edges = ResizeEdge::empty();
+                    if pos_within_tile.x < size.w / 3. {
+                        edges |= ResizeEdge::LEFT;
+                    } else if 2. * size.w / 3. < pos_within_tile.x {
+                        edges |= ResizeEdge::RIGHT;
+                    }
+                    if pos_within_tile.y < size.h / 3. {
+                        edges |= ResizeEdge::TOP;
+                    } else if 2. * size.h / 3. < pos_within_tile.y {
+                        edges |= ResizeEdge::BOTTOM;
+                    }
+                    Some(edges)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {

@@ -622,6 +622,15 @@ enum Op {
         id: Option<usize>,
         floating: bool,
     },
+    ToggleWindowSticky {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+    },
+    SetWindowSticky {
+        #[proptest(strategy = "proptest::option::of(1..=5usize)")]
+        id: Option<usize>,
+        sticky: bool,
+    },
     FocusFloating,
     FocusTiling,
     SwitchFocusFloatingTiling,
@@ -906,7 +915,12 @@ impl Op {
                     }
                 }
 
-                let is_floating = params.is_floating;
+                let is_floating = params.is_floating
+                    || params
+                        .rules
+                        .as_ref()
+                        .and_then(|r| r.open_sticky)
+                        .unwrap_or(false);
                 let win = TestWindow::new(params);
                 layout.add_window(
                     win,
@@ -1357,6 +1371,14 @@ impl Op {
             Op::SetWindowFloating { id, floating } => {
                 let id = id.filter(|id| layout.has_window(id));
                 layout.set_window_floating(id.as_ref(), floating);
+            }
+            Op::ToggleWindowSticky { id } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.toggle_window_sticky(id.as_ref());
+            }
+            Op::SetWindowSticky { id, sticky } => {
+                let id = id.filter(|id| layout.has_window(id));
+                layout.set_window_sticky(id.as_ref(), sticky);
             }
             Op::FocusFloating => {
                 layout.focus_floating();
@@ -3849,6 +3871,140 @@ fn workspace_render_geo_at_fractional_scale() {
         "active workspace must be at y = 0 exactly, \
          otherwise a pointer against the screen edge at y = 0 won't hit it"
     );
+}
+
+#[test]
+fn toggle_window_sticky_tiled_auto_floats_and_makes_sticky() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    assert!(!layout.is_floating(&1));
+    assert!(!layout.is_sticky(&1));
+
+    layout.toggle_window_sticky(Some(&1));
+    assert!(layout.is_floating(&1));
+    assert!(layout.is_sticky(&1));
+
+    // Toggling again unsets sticky, but leaves the window floating.
+    layout.toggle_window_sticky(Some(&1));
+    assert!(layout.is_floating(&1));
+    assert!(!layout.is_sticky(&1));
+}
+
+#[test]
+fn sticky_window_stays_on_active_workspace_when_switching_workspaces() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleWindowSticky { id: Some(1) },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+    ];
+    let mut layout = check_ops(ops);
+    assert!(layout.is_sticky(&1));
+
+    // Focus window 1 (floating & sticky)
+    layout.activate_window(&1);
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1));
+
+    // Switch to workspace down (creates/activates workspace 1)
+    layout.switch_workspace_down();
+    // Window 1 should now be on the active workspace and focused!
+    assert!(layout.active_workspace().unwrap().is_sticky(&1));
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1));
+
+    // Switch back up
+    layout.switch_workspace_up();
+    assert!(layout.active_workspace().unwrap().is_sticky(&1));
+    assert_eq!(layout.focus().map(|w| *w.id()), Some(1));
+}
+
+#[test]
+fn unfloating_sticky_window_clears_sticky() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleWindowSticky { id: Some(1) },
+    ];
+    let mut layout = check_ops(ops);
+    assert!(layout.is_floating(&1));
+    assert!(layout.is_sticky(&1));
+
+    // Unfloat the window
+    layout.toggle_window_floating(Some(&1));
+    assert!(!layout.is_floating(&1));
+    assert!(!layout.is_sticky(&1));
+}
+
+#[test]
+fn move_sticky_window_to_workspace_clears_sticky() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWorkspaceUp,
+        Op::ToggleWindowSticky { id: Some(1) },
+    ];
+    let mut layout = check_ops(ops);
+    assert!(layout.is_sticky(&1));
+
+    // Explicitly move window 1 to workspace 1
+    layout.move_to_workspace(Some(&1), 1, ActivateWindow::Yes);
+    assert!(!layout.is_sticky(&1));
+    assert!(layout.is_floating(&1));
+}
+
+#[test]
+fn move_sticky_window_to_output_preserves_sticky() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleWindowSticky { id: Some(1) },
+    ];
+    let mut layout = check_ops(ops);
+    assert!(layout.is_sticky(&1));
+
+    let output2 = layout.outputs().find(|o| o.name() == "output2").cloned().unwrap();
+    layout.move_to_output(Some(&1), &output2, None, ActivateWindow::Yes);
+    assert!(layout.is_sticky(&1));
+    assert!(layout.is_floating(&1));
+}
+
+#[test]
+fn open_sticky_window_rule() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams {
+                rules: Some(ResolvedWindowRules {
+                    open_sticky: Some(true),
+                    ..ResolvedWindowRules::default()
+                }),
+                ..TestWindowParams::new(1)
+            },
+        },
+    ];
+    let layout = check_ops(ops);
+    assert!(layout.is_floating(&1));
+    assert!(layout.is_sticky(&1));
 }
 
 fn parent_id_causes_loop(layout: &Layout<TestWindow>, id: usize, mut parent_id: usize) -> bool {
