@@ -3982,7 +3982,11 @@ fn move_sticky_window_to_output_preserves_sticky() {
     let mut layout = check_ops(ops);
     assert!(layout.is_sticky(&1));
 
-    let output2 = layout.outputs().find(|o| o.name() == "output2").cloned().unwrap();
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .cloned()
+        .unwrap();
     layout.move_to_output(Some(&1), &output2, None, ActivateWindow::Yes);
     assert!(layout.is_sticky(&1));
     assert!(layout.is_floating(&1));
@@ -4005,6 +4009,30 @@ fn open_sticky_window_rule() {
     let layout = check_ops(ops);
     assert!(layout.is_floating(&1));
     assert!(layout.is_sticky(&1));
+}
+
+#[test]
+fn repro_sticky_crash() {
+    let options = Options {
+        layout: niri_config::Layout {
+            empty_workspace_above_first: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ops = [
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddOutput(1),
+        Op::ToggleWindowSticky { id: None },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::ToggleWindowSticky { id: None },
+        Op::FocusWindowOrWorkspaceUp,
+    ];
+    check_ops_with_options(options, ops);
 }
 
 fn parent_id_causes_loop(layout: &Layout<TestWindow>, id: usize, mut parent_id: usize) -> bool {

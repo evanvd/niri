@@ -1547,11 +1547,7 @@ impl<W: LayoutElement> Workspace<W> {
         (tiles, was_sticky_active)
     }
 
-    pub fn insert_sticky_floating_tiles(
-        &mut self,
-        tiles: Vec<(Tile<W>, bool)>,
-        make_active: bool,
-    ) {
+    pub fn insert_sticky_floating_tiles(&mut self, tiles: Vec<(Tile<W>, bool)>, make_active: bool) {
         if tiles.is_empty() {
             return;
         }

@@ -440,7 +440,10 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn transfer_sticky_windows(&mut self, from_idx: usize, to_idx: usize) {
-        if from_idx == to_idx || from_idx >= self.workspaces.len() || to_idx >= self.workspaces.len() {
+        if from_idx == to_idx
+            || from_idx >= self.workspaces.len()
+            || to_idx >= self.workspaces.len()
+        {
             return;
         }
 
@@ -459,15 +462,24 @@ impl<W: LayoutElement> Monitor<W> {
 
         let config = self.options.animations.workspace_switch.0;
 
+        // Extract all sticky tiles from the source workspace first, before adding to the target,
+        // so that potential workspace insertions/shifts don't invalidate indices.
+        let mut extracted_tiles = Vec::new();
         for win_id in sticky_win_ids {
-            let was_active = self.workspaces[from_idx].active_window().map(|w| w.id()) == Some(&win_id);
-            let old_render_pos = self.workspaces[from_idx]
+            let from_ws = &mut self.workspaces[from_idx];
+            let was_active = from_ws.active_window().map(|w| w.id()) == Some(&win_id);
+            let old_render_pos = from_ws
                 .tiles_with_render_positions()
                 .find_map(|(tile, offset, _)| (tile.window().id() == &win_id).then_some(offset));
 
             let transaction = Transaction::new();
-            let removed = self.workspaces[from_idx].remove_tile(&win_id, transaction);
+            let removed = from_ws.remove_tile(&win_id, transaction);
+            extracted_tiles.push((win_id, was_active, old_render_pos, removed));
+        }
 
+        let mut anim_data = Vec::new();
+        for (win_id, was_active, old_render_pos, removed) in extracted_tiles {
+            anim_data.push((win_id, old_render_pos));
             self.add_tile(
                 removed.tile,
                 MonitorAddWindowTarget::Workspace {
@@ -485,19 +497,25 @@ impl<W: LayoutElement> Monitor<W> {
                 removed.is_floating,
                 Some(config),
             );
+        }
 
-            if let (Some(mut old_render_pos), Some(source_workspace_idx)) =
-                (old_render_pos, self.idx_of_ws(from_id))
-            {
-                old_render_pos.y += self.workspace_size_with_gap(1.).h
-                    * (source_workspace_idx as f64 - to_idx as f64);
+        if let (Some(source_workspace_idx), Some(target_idx)) =
+            (self.idx_of_ws(from_id), self.idx_of_ws(to_id))
+        {
+            let gap_h = self.workspace_size_with_gap(1.).h;
+            let offset_y = gap_h * (source_workspace_idx as f64 - target_idx as f64);
 
-                if let Some((tile, new_render_pos)) = self.workspaces[to_idx]
-                    .tiles_with_render_positions_mut(false)
-                    .find(|(tile, _)| tile.window().id() == &win_id)
-                {
-                    tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
-                    tile.set_anim_y_between_workspaces();
+            for (win_id, old_render_pos) in anim_data {
+                if let Some(mut old_render_pos) = old_render_pos {
+                    old_render_pos.y += offset_y;
+
+                    if let Some((tile, new_render_pos)) = self.workspaces[target_idx]
+                        .tiles_with_render_positions_mut(false)
+                        .find(|(tile, _)| tile.window().id() == &win_id)
+                    {
+                        tile.animate_move_from_with_config(old_render_pos - new_render_pos, config);
+                        tile.set_anim_y_between_workspaces();
+                    }
                 }
             }
         }
@@ -520,38 +538,50 @@ impl<W: LayoutElement> Monitor<W> {
         }
 
         let prev_active_idx = self.active_workspace_idx;
+        let prev_active_id = self.workspaces[prev_active_idx].id();
+        let target_id = self.workspaces[idx].id();
+
         self.active_workspace_idx = idx;
 
         if prev_active_idx != idx {
             self.transfer_sticky_windows(prev_active_idx, idx);
         }
 
+        // Recompute indices because transfer_sticky_windows may have added a workspace at top or
+        // bottom.
+        let target_idx = self.idx_of_ws(target_id).unwrap();
+        self.active_workspace_idx = target_idx;
+        let from_idx = self
+            .idx_of_ws(prev_active_id)
+            .map(|i| i as f64)
+            .unwrap_or(current_idx);
+
         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
 
         match &mut self.workspace_switch {
             // During a DnD scroll, we want to visually animate even if idx matches the active idx.
             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
-                gesture.center_idx = idx;
+                gesture.center_idx = target_idx;
 
-                // Adjust start_idx to make current_idx point at idx.
+                // Adjust start_idx to make current_idx point at target_idx.
                 let current_pos = gesture.current_idx - gesture.start_idx;
-                gesture.start_idx = idx as f64 - current_pos;
+                gesture.start_idx = target_idx as f64 - current_pos;
                 let prev_current_idx = gesture.current_idx;
-                gesture.current_idx = idx as f64;
+                gesture.current_idx = target_idx as f64;
 
                 let current_idx_delta = gesture.current_idx - prev_current_idx;
                 gesture.animate_from(-current_idx_delta, self.clock.clone(), config);
             }
             _ => {
                 // Don't animate if nothing changed.
-                if prev_active_idx == idx {
+                if self.idx_of_ws(prev_active_id) == Some(target_idx) {
                     return;
                 }
 
                 self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
                     self.clock.clone(),
-                    current_idx,
-                    idx as f64,
+                    from_idx,
+                    target_idx as f64,
                     0.,
                     config,
                 )));

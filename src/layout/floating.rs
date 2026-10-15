@@ -458,8 +458,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let mut i = 0;
         while i < self.tiles.len() {
             if self.tiles[i].is_sticky() {
-                let is_active =
-                    Some(self.tiles[i].window().id()) == self.active_window_id.as_ref();
+                let is_active = Some(self.tiles[i].window().id()) == self.active_window_id.as_ref();
                 let mut tile = self.tiles.remove(i);
                 let data = self.data.remove(i);
                 if let Some(size) = tile.window().expected_size() {
@@ -1180,7 +1179,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
     ) {
         let scale = Scale::from(self.scale);
 
-        // Draw the closing windows on top of the other windows (only when rendering non-sticky or all).
+        // Draw the closing windows on top of the other windows (only when rendering non-sticky or
+        // all).
         if layer.is_normal() && filter != FloatingFilter::StickyOnly {
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
